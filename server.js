@@ -1,5 +1,15 @@
 const express=require('express'),cr=require('crypto'),L=require('./lib'),db=L.load();
-const app=express(),tok=new Map();app.use(express.json({limit:'1mb'}));app.use(express.static(__dirname+'/public'));
+const app=express(),tok=new Map();
+// Security Headers Middleware (DPDP Act & OWASP Best Practices)
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+app.use(express.json({limit:'1mb'}));
+app.use(express.static(__dirname+'/public'));
 
 // Real-Time Event Broadcaster (Server-Sent Events)
 const sseClients = new Set();
@@ -183,17 +193,20 @@ app.get('/api/customer/lookup',(q,s)=>{
 });
 
 app.post('/api/customer/dispute',(q,s)=>{
-  const {customer,order,issue,details}=q.body;
-  if(!customer||!details)return s.status(400).json({error:'Customer and dispute details required'});
-  const c=db.customers.find(x=>x.id===customer||x.sv_num===customer);
+  const custQuery=safeStr(q.body.customer,30);
+  const rawDetails=safeStr(q.body.details,1000);
+  const issue=safeStr(q.body.issue||'PAYMENT_PENDING',50);
+  const order=safeStr(q.body.order,20)||null;
+  if(!custQuery||!rawDetails)return s.status(400).json({error:'Customer and dispute details required'});
+  const c=db.customers.find(x=>x.id===custQuery||x.sv_num===custQuery);
   if(!c)return s.status(404).json({error:'Customer not found'});
   const ticketId='DSP-'+Date.now().toString().slice(-6);
   L.add({
     type:'DISPUTE',
     customer:c.id,
-    order:order||null,
+    order,
     by:'CUSTOMER_PORTAL',
-    p:{ticketId,issue:issue||'PAYMENT_PENDING',details,customerName:c.name,village:c.village}
+    p:{ticketId,issue,details:esc(rawDetails),customerName:c.name,village:c.village}
   });
   L.save();
   broadcast('dispute_created',{ticketId,customerName:c.name});
@@ -221,8 +234,10 @@ app.post('/api/customer/book',(q,s)=>{
   }
 
   const price=t==='5kg'?350:900;
+  let nextNum=1000+db.orders.length;
+  while(db.orders.some(x=>x.id==='O'+nextNum))nextNum++;
   const o={
-    id:'O'+(1000+db.orders.length),
+    id:'O'+nextNum,
     customer:c.id,
     type:t,
     qty,
@@ -406,7 +421,9 @@ app.post('/api/orders',auth('counter'),(q,s)=>{
   const already=db.orders.find(o=>o.customer===cust&&!o.run&&!delivered.has(o.id));
   if(already)return s.status(400).json({error:`Customer already has pending booking ${already.id}`});
   const price=t==='5kg'?350:900;
-  const o={id:'O'+(1000+db.orders.length),customer:cust,type:t,qty,price,run:null,created_at:new Date().toISOString()};
+  let nextNum=1000+db.orders.length;
+  while(db.orders.some(x=>x.id==='O'+nextNum))nextNum++;
+  const o={id:'O'+nextNum,customer:cust,type:t,qty,price,run:null,created_at:new Date().toISOString()};
   db.orders.push(o);
   L.add({type:'BOOK',order:o.id,customer:o.customer,by:q.u.id,p:{type:t,qty}});
   L.save();
@@ -420,7 +437,9 @@ app.post('/api/runs',auth('counter'),(q,s)=>{
   if(!vehicle)return s.status(400).json({error:'Vehicle number required'});
   if(!db.users.some(u=>u.id===staff&&u.role==='delivery'))return s.status(400).json({error:'Invalid delivery staff ID'});
   if(loaded<1)return s.status(400).json({error:'Must load at least 1 cylinder'});
-  const r={id:'R'+(100+db.runs.length),vehicle,staff,loaded,date:new Date().toISOString().slice(0,10)};
+  let nextRun=100+db.runs.length;
+  while(db.runs.some(x=>x.id==='R'+nextRun))nextRun++;
+  const r={id:'R'+nextRun,vehicle,staff,loaded,date:new Date().toISOString().slice(0,10)};
   db.runs.push(r);
   (q.body.orders||[]).forEach(id=>{
     const o=db.orders.find(o=>o.id===String(id));
@@ -439,10 +458,19 @@ app.get('/api/exceptions',auth('counter','owner','auditor'),(q,s)=>{
 });
 app.get('/api/timeline/:c',auth('counter','owner','auditor'),(q,s)=>{const rv=new Set(db.events.filter(e=>e.type==='REVERSE').map(e=>e.p.of));
   s.json(db.events.filter(e=>e.customer===q.params.c||(e.type==='REVERSE'&&db.events.find(x=>x.id===e.p.of)?.customer===q.params.c)).map(e=>({id:e.id,ts:e.ts,type:e.type,by:e.by,p:e.p,reversed:rv.has(e.id)})))});
-app.post('/api/reverse',auth('owner'),(q,s)=>{const t=db.events.find(e=>e.id===q.body.id);if(!t||t.type==='REVERSE')return s.status(400).json({error:'bad entry'});
-  if(!String(q.body.reason||'').trim())return s.status(400).json({error:'reason required'});L.add({type:'REVERSE',run:t.run,order:t.order,customer:t.customer,by:q.u.id,p:{of:t.id,reason:q.body.reason}});L.save();
-  broadcast('ledger_reversed',{id:q.body.id});
-  s.json({ok:1})});
+app.post('/api/reverse',auth('owner'),(q,s)=>{
+  const eventId=safeStr(q.body.id,50);
+  const t=db.events.find(e=>e.id===eventId);
+  if(!t||t.type==='REVERSE')return s.status(400).json({error:'Invalid or non-reversible ledger entry'});
+  const alreadyReversed=db.events.some(e=>e.type==='REVERSE'&&e.p?.of===t.id);
+  if(alreadyReversed)return s.status(400).json({error:'This ledger entry has already been reversed'});
+  const reason=safeStr(q.body.reason,500);
+  if(!reason)return s.status(400).json({error:'Mandatory audit reason required for reversal'});
+  L.add({type:'REVERSE',run:t.run,order:t.order,customer:t.customer,by:q.u.id,p:{of:t.id,reason:esc(reason)}});
+  L.save();
+  broadcast('ledger_reversed',{id:eventId});
+  s.json({ok:1});
+});
 app.post('/api/audit/reveal',auth('owner'),(q,s)=>{
   const cid=q.body.customer;
   const c=db.customers.find(x=>x.id===cid||x.sv_num===cid);

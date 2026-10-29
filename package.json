@@ -1,0 +1,16 @@
+{
+  "name": "vijaya-gas-erp",
+  "version": "1.0.0",
+  "description": "Offline-first LPG distribution ledger and reconciliation",
+  "main": "server.js",
+  "scripts": {
+    "build": "node seed.js",
+    "seed": "node seed.js",
+    "start": "node server.js",
+    "check": "node check.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

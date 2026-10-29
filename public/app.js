@@ -3435,11 +3435,33 @@ const ACT={
     }catch(e){
       alert('Network error while booking refill');
     }
+  },
+
+  // Reports Hub Tab Switcher & Filters
+  rp_tab: async d => {
+    reportsActiveReport = d.k;
+    await office();
+  },
+  rp_refresh: async () => {
+    reportsData = { outstanding: null, monthly: null, custHistory: null, stock: null };
+    showToast('Reports data refreshed from live ledger.');
+    await office();
+  },
+  rp_filtercust: async () => {
+    const inp = document.getElementById('rp_village_filter');
+    reportsVillageFilter = inp ? inp.value.trim() : '';
+    reportsData.custHistory = null;
+    await office();
+  },
+  rp_clearcust: async () => {
+    reportsVillageFilter = '';
+    reportsData.custHistory = null;
+    await office();
   }
 };
 
 let searchDebounceTimer=null;
-A.onclick=e=>{const b=e.target.closest('[data-a]');if(b)ACT[b.dataset.a](b.dataset)};
+A.onclick=e=>{const b=e.target.closest('[data-a]');if(b&&ACT[b.dataset.a])ACT[b.dataset.a](b.dataset)};
 A.oninput=e=>{
   if(e.target.id==='ref')f.ref=e.target.value;
   if(e.target.id==='cu_search'){

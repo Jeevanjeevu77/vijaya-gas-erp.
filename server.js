@@ -42,15 +42,51 @@ app.get('/api/live', (q, s) => {
   });
 });
 
-// Token store with 8-hour expiry
+// Stateless Cryptographically Signed Session Tokens (HMAC-SHA256) with 8-hour expiry
 const TOKEN_TTL=8*60*60*1000;
+const SESSION_SECRET=process.env.SESSION_SECRET||'vga_erp_secret_salt_2026';
+
+function signToken(u){
+  const payload=Buffer.from(JSON.stringify({
+    id:u.id,
+    role:u.role,
+    name:u.name,
+    exp:Date.now()+TOKEN_TTL
+  })).toString('base64url');
+  const sig=cr.createHmac('sha256',SESSION_SECRET).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyToken(token){
+  if(!token||typeof token!=='string')return null;
+  // Backward compatibility with in-memory tokens
+  if(tok.has(token)){
+    const entry=tok.get(token);
+    if(Date.now()<=entry.exp)return entry.u;
+  }
+  const parts=token.split('.');
+  if(parts.length!==2)return null;
+  const [payloadB64,sig]=parts;
+  try{
+    const expectedSig=cr.createHmac('sha256',SESSION_SECRET).update(payloadB64).digest('base64url');
+    if(sig.length!==expectedSig.length||!cr.timingSafeEqual(Buffer.from(sig),Buffer.from(expectedSig)))return null;
+    const data=JSON.parse(Buffer.from(payloadB64,'base64url').toString('utf8'));
+    if(Date.now()>data.exp)return null;
+    const u=db.users.find(x=>x.id===data.id);
+    return u||data;
+  }catch(e){
+    return null;
+  }
+}
+
 const auth=(...roles)=>(q,s,n)=>{
   const key=q.get('x-token')||q.query.t;
-  const entry=tok.get(key);
-  if(!entry)return s.status(401).json({error:'login'});
-  if(Date.now()>entry.exp){tok.delete(key);return s.status(401).json({error:'login'})}
-  if(roles.length&&!roles.includes(entry.u.role))return s.status(403).json({error:'forbidden'});
-  q.u=entry.u;n();
+  if(!key)return s.status(401).json({error:'login'});
+  const user=verifyToken(key);
+  if(!user)return s.status(401).json({error:'login'});
+  if(roles.length&&!roles.includes(user.role))return s.status(403).json({error:'forbidden'});
+  q.u=user;
+  n();
 };
 const esc=x=>String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const failedLogins=new Map();
@@ -83,7 +119,7 @@ app.post('/api/login',(q,s)=>{
     return s.status(401).json({error:`Wrong PIN (${5-a.cnt} attempts left)`});
   }
   failedLogins.delete(k);
-  const t=cr.randomUUID();
+  const t=signToken(u);
   tok.set(t,{u,exp:Date.now()+TOKEN_TTL});
   s.json({token:t,role:u.role,name:u.name,expiresIn:'8 hours'});
 });
@@ -410,7 +446,7 @@ app.get('/api/disputes',auth('counter','owner','auditor'),(q,s)=>{
   }));
   s.json(disputes);
 });
-app.post('/api/orders',auth('counter'),(q,s)=>{
+app.post('/api/orders',auth('counter','owner'),(q,s)=>{
   const cust=safeStr(q.body.customer,20);
   const t=q.body.type==='5kg'?'5kg':'14.2kg';
   const qty=safeInt(q.body.qty,1,10,1);
@@ -430,7 +466,7 @@ app.post('/api/orders',auth('counter'),(q,s)=>{
   broadcast('order_booked',{order:o,customer:cust});
   s.json(o);
 });
-app.post('/api/runs',auth('counter'),(q,s)=>{
+app.post('/api/runs',auth('counter','owner'),(q,s)=>{
   const vehicle=safeStr(q.body.vehicle,30);
   const staff=safeStr(q.body.staff,10);
   const loaded=safeInt(q.body.loaded,1,200,0);
@@ -535,7 +571,7 @@ app.get('/api/anomalies',auth('owner','auditor'),(q,s)=>{
   });
   s.json(hints);
 });
-app.post('/api/deposit',auth('counter'),(q,s)=>{
+app.post('/api/deposit',auth('counter','owner'),(q,s)=>{
   const runId=safeStr(q.body.run,10);
   const amt=safeAmt(q.body.amount,1,500000);
   const ref=safeStr(q.body.ref,100);

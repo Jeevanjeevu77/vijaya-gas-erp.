@@ -203,7 +203,7 @@ let showPostponeModal=false,postponeOrderId=null,postponeReason='DOOR_LOCKED';
 let selectedVillage='',villagesCache=[],disputesCache=[];
 let vehCapacityType='bike';
 let driverVillageFilter='',showPodModal=false,podOrderData=null;
-let bookingFastQuery='',denomCounts={};
+let bookingFastQuery='',denomCounts={},lastBookedOrderId=null;
 let dailySummaryData=null,dailySummaryDate='',defaultsData=null,closingSheetData=null,closingSheetDate='';
 let reportsData={outstanding:null,monthly:null,custHistory:null,stock:null};let reportsActiveReport='stock';let reportsVillageFilter='';
 
@@ -391,6 +391,10 @@ function initLiveStream(){
     liveEventSource.addEventListener('order_booked',e=>{
       try{
         const d=JSON.parse(e.data);
+        if(d.order?.id&&d.order.id===lastBookedOrderId){
+          lastBookedOrderId=null;
+          return;
+        }
         showToast(`⚡ Refill Booked: ${d.order?.id||''} for ${d.customerName||d.customer||''}!`);
         pendingOrdersCache=[];
         stockCache=null;
@@ -2830,7 +2834,30 @@ async function office(){
   // If skeleton was pre-rendered, only update the body area; else full render
   const bodyEl=document.getElementById('office_body');
   if(bodyEl){
+    const activeEl=document.activeElement;
+    const activeId=activeEl?activeEl.id:null;
+    const selStart=(activeEl&&activeEl.selectionStart!==undefined)?activeEl.selectionStart:null;
+    const selEnd=(activeEl&&activeEl.selectionEnd!==undefined)?activeEl.selectionEnd:null;
+
     bodyEl.innerHTML=body;
+
+    // Update active tab buttons without re-rendering layout
+    document.querySelectorAll('.sb-btn').forEach(b=>{
+      b.classList.toggle('active', b.dataset.k === tab);
+    });
+    document.querySelectorAll('.mobile-tabs-bar .tb').forEach(b=>{
+      if(b.dataset.k) b.classList.toggle('on', b.dataset.k === tab);
+    });
+
+    // Restore focus and cursor if user was typing in an input
+    if(activeId && document.getElementById(activeId)){
+      const el=document.getElementById(activeId);
+      el.focus();
+      if(selStart!==null && selEnd!==null && typeof el.setSelectionRange==='function'){
+        try{ el.setSelectionRange(selStart, selEnd); }catch(e){}
+      }
+    }
+
     let over=document.getElementById('_modals');
     if(!over){over=document.createElement('div');over.id='_modals';A.appendChild(over);}
     over.innerHTML=slipModal+revModal+toast;
@@ -2864,7 +2891,7 @@ async function office(){
         `).join('')}
         <button class="tb" data-a="out" style="color:#B91C1C">${tr('signOut')}</button>
       </div>
-      <div class="office-main">
+      <div class="office-main" id="office_body">
         ${body}
       </div>
     </div>
@@ -3398,6 +3425,7 @@ const ACT={
         body:{customer:cid,type,qty}
       });
       if(r.id){
+        lastBookedOrderId=r.id;
         showToast(`Refill ${r.id} booked for ${r.customer}! Ready for dispatch.`);
         pendingOrdersCache=[];
         office();
